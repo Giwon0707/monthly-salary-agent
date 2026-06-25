@@ -40,22 +40,34 @@ st.markdown(
         border-radius: 18px;
         padding: 1rem 1.1rem;
         background: white;
+        color: #1f2937;
         min-height: 118px;
     }
-    .info-card h4 {margin: 0 0 0.35rem 0;}
+    .info-card h4 {margin: 0 0 0.35rem 0; color: #111827;}
     .muted {color: #667085; font-size: 0.92rem;}
+
     div[data-testid="stMetric"] {
         background: #ffffff;
         border: 1px solid #e5e7eb;
         padding: 14px;
         border-radius: 16px;
     }
+    div[data-testid="stMetric"] label,
+    div[data-testid="stMetric"] [data-testid="stMetricLabel"] {
+        color: #667085 !important;
+    }
+    div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+        color: #111827 !important;
+    }
+
     .result-box {
         border-radius: 18px;
         padding: 1.05rem 1.15rem;
         background: #f7fbff;
         border: 1px solid #d7eaf8;
+        color: #1f2937;
     }
+    .result-box b {color: #111827;}
     </style>
     """,
     unsafe_allow_html=True,
