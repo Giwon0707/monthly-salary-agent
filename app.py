@@ -477,6 +477,30 @@ def calculate_plan(form: dict) -> dict:
             "증감": current_value - base_value,
         })
 
+    principal_at_target = (
+        total_assets
+        + current_plan["저축"]
+        + current_plan["투자"]
+        + max(target_months - 1, 0) * (
+            base_plan["저축"] + base_plan["투자"]
+        )
+    )
+    expected_profit = projected_at_target - principal_at_target
+    target_shortfall = max(target_amount - projected_at_target, 0)
+
+    saving_investment_rate = (
+        base_monthly_contribution / income * 100
+        if income > 0 else 0
+    )
+    if saving_investment_rate >= 60:
+        plan_intensity = "매우 높음"
+    elif saving_investment_rate >= 45:
+        plan_intensity = "높음"
+    elif saving_investment_rate >= 30:
+        plan_intensity = "보통"
+    else:
+        plan_intensity = "낮음"
+
     return {
         "total_assets": total_assets,
         "net_assets": net_assets,
@@ -494,6 +518,11 @@ def calculate_plan(form: dict) -> dict:
         "current_monthly_contribution": current_monthly_contribution,
         "one_time_reduction": one_time_reduction,
         "projected_at_target": projected_at_target,
+        "principal_at_target": principal_at_target,
+        "expected_profit": expected_profit,
+        "target_shortfall": target_shortfall,
+        "saving_investment_rate": saving_investment_rate,
+        "plan_intensity": plan_intensity,
         "projection_history": projection_history,
         "expected_months": expected_months,
         "explanation": explanation,
@@ -600,14 +629,14 @@ def input_form():
         st.subheader("6. 목표와 투자 성향")
         c1, c2 = st.columns(2)
         goal_name = c1.text_input("재무 목표", value="목돈 마련")
-        target_amount = c2.number_input("목표 금액", min_value=0, value=50_000_000, step=1_000_000, format="%d")
+        target_amount = c2.number_input("목표 금액", min_value=0, value=100_000_000, step=1_000_000, format="%d")
         target_months = c1.number_input("목표 기간(개월)", min_value=1, value=36, step=1)
-        risk = c2.selectbox("투자 성향", list(RISK_RATIOS.keys()), index=2)
+        risk = c2.selectbox("투자 성향", list(RISK_RATIOS.keys()), index=4)
 
-        st.subheader("7. 이번 달 달라진 상황")
+        st.subheader("7. 요청 사항")
         request = st.text_area(
-            "이번 달에만 발생한 지출이나 고민을 적어주세요.",
-            value="이번 달은 부모님 생신이라 50만 원 정도 추가로 필요해. 평소 목표는 유지하면서 이번 달만 조정해줘.",
+            "이번 달 상황이나 원하는 조정 내용을 적어주세요.",
+            value="이번 달은 해외여행으로 100만 원 정도 추가 지출이 있을 것 같아. 평소 목표는 유지하면서 이번 달만 조정해줘.",
             height=120,
             help="예: 다음 달 여행 예약금으로 이번 달 30만 원이 더 필요해.",
         )
@@ -765,14 +794,32 @@ def result_page():
         st.dataframe(variable_df, hide_index=True, use_container_width=True)
 
     st.subheader("장기 목표 예상")
-    c1, c2 = st.columns(2)
     expected = (
         f"약 {result['expected_months']}개월"
         if result["expected_months"] >= 0
         else "50년 내 달성 어려움"
     )
+
+    c1, c2 = st.columns(2)
     c1.metric("목표 달성 예상 기간", expected)
     c2.metric(f"{form['target_months']}개월 후 예상자산", won(result["projected_at_target"]))
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("납입 원금 기준", won(result["principal_at_target"]))
+    c2.metric("예상 운용수익", won(result["expected_profit"]))
+    c3.metric("목표 부족액", won(result["target_shortfall"]))
+
+    st.markdown(
+        f"""
+        <div class="result-box">
+        <b>계획 강도: {result['plan_intensity']}</b><br>
+        평소 저축·투자율은 월급의 {result['saving_investment_rate']:.1f}%입니다.
+        주거비가 없거나 생활비가 안정적으로 유지되는 경우 실행 가능하지만,
+        예상하지 못한 지출이 반복되면 계획을 다시 조정해야 합니다.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     st.caption(
         f"이번 달은 조정 계획, 다음 달부터는 평소 계획으로 계산 | "
