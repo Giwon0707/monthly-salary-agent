@@ -556,9 +556,9 @@ def input_form():
 
         st.subheader("2. 평소 고정지출")
         c1, c2 = st.columns(2)
-        housing = c1.number_input("주거비·관리비", min_value=0, value=400_000, step=50_000, format="%d")
+        housing = c1.number_input("주거비·관리비", min_value=0, value=0, step=50_000, format="%d")
         telecom = c2.number_input("통신비", min_value=0, value=80_000, step=10_000, format="%d")
-        transport = c1.number_input("교통비", min_value=0, value=150_000, step=10_000, format="%d")
+        transport = c1.number_input("교통비", min_value=0, value=50_000, step=10_000, format="%d")
         insurance = c2.number_input("보험료", min_value=0, value=100_000, step=10_000, format="%d")
         subscriptions = c1.number_input("구독료", min_value=0, value=30_000, step=10_000, format="%d")
         other_fixed = c2.number_input("기타 고정지출", min_value=0, value=40_000, step=10_000, format="%d")
@@ -707,6 +707,7 @@ def result_page():
     )
     st.dataframe(display_df, hide_index=True, use_container_width=True)
 
+    comparison_chart_categories = {"특별지출", "저축", "투자", "여유자금"}
     chart_df = pd.DataFrame([
         {
             "항목": row["항목"],
@@ -714,7 +715,7 @@ def result_page():
             "구분": "평소 계획",
         }
         for row in result["comparison_rows"]
-        if row["평소 계획"] > 0
+        if row["항목"] in comparison_chart_categories and row["평소 계획"] > 0
     ] + [
         {
             "항목": row["항목"],
@@ -722,7 +723,7 @@ def result_page():
             "구분": "이번 달 계획",
         }
         for row in result["comparison_rows"]
-        if row["이번 달 계획"] > 0
+        if row["항목"] in comparison_chart_categories and row["이번 달 계획"] > 0
     ])
 
     fig = px.bar(
