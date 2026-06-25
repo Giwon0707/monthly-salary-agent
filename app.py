@@ -24,7 +24,7 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    .block-container {max-width: 920px; padding-top: 2rem; padding-bottom: 3rem;}
+    .block-container {max-width: 980px; padding-top: 2rem; padding-bottom: 3rem;}
     .hero {
         padding: 2.2rem 1.6rem;
         border-radius: 24px;
@@ -99,8 +99,12 @@ def init_state():
             st.session_state[key] = value
 
 
+def monthly_rate(annual_percent: float) -> float:
+    annual_decimal = annual_percent / 100
+    return (1 + annual_decimal) ** (1 / 12) - 1
+
+
 def extract_special_expense(text: str) -> tuple[str, int]:
-    """간단한 한국어 금액 표현을 찾아 특별지출 이름과 금액을 반환한다."""
     text = text.strip()
     if not text:
         return "특별지출", 0
@@ -111,6 +115,7 @@ def extract_special_expense(text: str) -> tuple[str, int]:
         (r"(\d+(?:\.\d+)?)\s*만\s*원?", 10_000),
         (r"(\d{1,3}(?:,\d{3})+|\d+)\s*원", 1),
     ]
+
     amount = 0
     for pattern, multiplier in patterns:
         match = re.search(pattern, text)
@@ -118,7 +123,7 @@ def extract_special_expense(text: str) -> tuple[str, int]:
             amount = int(float(match.group(1).replace(",", "")) * multiplier)
             break
 
-    label_candidates = {
+    labels = {
         "부모님": "부모님 생신/가족행사",
         "생신": "부모님 생신/가족행사",
         "여행": "여행",
@@ -131,16 +136,17 @@ def extract_special_expense(text: str) -> tuple[str, int]:
         "결혼": "결혼/경조사",
         "전자제품": "전자제품 구매",
     }
+
     label = "특별지출"
-    for keyword, candidate in label_candidates.items():
+    for keyword, value in labels.items():
         if keyword in text:
-            label = candidate
+            label = value
             break
+
     return label, amount
 
 
 def ask_ai_for_context(form: dict) -> dict | None:
-    """API 키가 있을 때 자유 입력에서 특별지출과 우선순위를 구조화한다."""
     api_key = None
     try:
         api_key = st.secrets.get("OPENAI_API_KEY")
@@ -157,21 +163,22 @@ def ask_ai_for_context(form: dict) -> dict | None:
         model = os.getenv("OPENAI_MODEL", model)
 
     prompt = f"""
-사용자의 월급 관리 요청을 분석해 JSON만 반환하세요.
+사용자의 이번 달 재무 요청을 분석해 JSON만 반환하세요.
 
 사용자 요청: {form['request']}
 
 반환 형식:
 {{
-  "special_event": "특별 상황 이름 또는 없음",
+  "special_event": "이번 달에만 발생하는 특별 상황 또는 없음",
   "special_amount": 숫자,
-  "priority": "사용자의 핵심 우선순위 한 문장"
+  "priority": "이번 달 조정에서 가장 중요한 기준 한 문장"
 }}
 
 규칙:
-- 금액은 원 단위 숫자로 반환
-- 명시된 특별지출 금액이 없으면 0
-- 특정 투자상품이나 종목을 추천하지 않음
+- 특별 상황은 평소 계획이 아니라 이번 달에만 적용되는 일시적 변화로 해석
+- 금액은 원 단위 숫자
+- 명시된 금액이 없으면 0
+- 특정 금융상품이나 종목은 추천하지 않음
 """
     try:
         client = OpenAI(api_key=api_key)
@@ -180,7 +187,7 @@ def ask_ai_for_context(form: dict) -> dict | None:
             input=[
                 {
                     "role": "system",
-                    "content": "당신은 한국어 재무 요청을 구조화하는 도우미입니다. JSON만 반환하세요.",
+                    "content": "당신은 사용자의 평소 재무계획과 이번 달의 일시적 변화를 구분하는 분석 도우미입니다. JSON만 반환하세요.",
                 },
                 {"role": "user", "content": prompt},
             ],
@@ -192,68 +199,149 @@ def ask_ai_for_context(form: dict) -> dict | None:
         return None
 
 
-def monthly_rate(annual_percent: float) -> float:
-    """연 수익률을 월 복리 수익률로 변환한다."""
-    annual_decimal = annual_percent / 100
-    return (1 + annual_decimal) ** (1 / 12) - 1
+def build_base_plan(
+    income: int,
+    fixed_total: int,
+    variable_total: int,
+    cash: int,
+    debt: int,
+    total_assets: int,
+    target_months: int,
+    risk: str,
+) -> tuple[dict, float, list[str]]:
+    available = max(income - fixed_total - variable_total, 0)
+    emergency_target = max((fixed_total + variable_total) * 3, 1)
+    emergency_ratio = cash / emergency_target
+
+    investment_ratio = RISK_RATIOS[risk]
+    reasons = []
+
+    if emergency_ratio < 0.5:
+        investment_ratio *= 0.35
+        reasons.append("비상금 부족")
+    elif emergency_ratio < 1:
+        investment_ratio *= 0.65
+        reasons.append("비상금 보완 필요")
+
+    if debt > total_assets * 0.5 and debt > 0:
+        investment_ratio *= 0.6
+        reasons.append("부채 부담")
+
+    if target_months <= 12:
+        investment_ratio *= 0.55
+        reasons.append("단기 목표")
+
+    investment = int(round(available * investment_ratio))
+
+    if emergency_ratio < 1:
+        saving = int(round(available * 0.65))
+    else:
+        saving = int(round(available * 0.50))
+
+    if saving + investment > available * 0.92:
+        scale = available * 0.92 / max(saving + investment, 1)
+        saving = int(round(saving * scale))
+        investment = int(round(investment * scale))
+
+    buffer_money = income - fixed_total - variable_total - saving - investment
+
+    plan = {
+        "고정지출": fixed_total,
+        "생활비": variable_total,
+        "특별지출": 0,
+        "저축": max(saving, 0),
+        "투자": max(investment, 0),
+        "여유자금": max(buffer_money, 0),
+    }
+
+    return plan, emergency_ratio, reasons
 
 
-def project_assets(
-    months: int,
+def adjust_for_special(base_plan: dict, special_amount: int) -> dict:
+    """
+    평소 계획을 유지하되 특별지출은 이번 달에만
+    여유자금 → 투자 → 저축 순으로 조정한다.
+    """
+    plan = dict(base_plan)
+    plan["특별지출"] = max(special_amount, 0)
+
+    remaining = special_amount
+
+    use_buffer = min(plan["여유자금"], remaining)
+    plan["여유자금"] -= use_buffer
+    remaining -= use_buffer
+
+    use_investment = min(plan["투자"], remaining)
+    plan["투자"] -= use_investment
+    remaining -= use_investment
+
+    use_saving = min(plan["저축"], remaining)
+    plan["저축"] -= use_saving
+    remaining -= use_saving
+
+    if remaining > 0:
+        reduce_variable = min(plan["생활비"], remaining)
+        plan["생활비"] -= reduce_variable
+        remaining -= reduce_variable
+
+    return plan
+
+
+def project_with_one_time_adjustment(
+    target_months: int,
     cash: float,
     savings_assets: float,
     investment_assets: float,
-    monthly_saving: float,
-    monthly_investment: float,
+    current_plan: dict,
+    base_plan: dict,
     savings_rate: float,
     investment_return: float,
 ) -> tuple[float, list[dict]]:
-    """현재 자산과 월 납입액을 월 복리로 예상한다."""
+    """
+    1개월차는 이번 달 조정계획,
+    2개월차부터는 평소 계획으로 복귀한다고 가정한다.
+    """
     saving_balance = float(savings_assets)
     investment_balance = float(investment_assets)
     cash_balance = float(cash)
+
     saving_monthly_rate = monthly_rate(savings_rate)
     investment_monthly_rate = monthly_rate(investment_return)
 
     history = [{
         "개월": 0,
-        "현금": cash_balance,
-        "예금·적금": saving_balance,
-        "주식·ETF": investment_balance,
         "총자산": cash_balance + saving_balance + investment_balance,
     }]
 
-    for month in range(1, months + 1):
+    for month in range(1, target_months + 1):
+        monthly_saving = current_plan["저축"] if month == 1 else base_plan["저축"]
+        monthly_investment = current_plan["투자"] if month == 1 else base_plan["투자"]
+
         saving_balance = saving_balance * (1 + saving_monthly_rate) + monthly_saving
         investment_balance = investment_balance * (1 + investment_monthly_rate) + monthly_investment
+
         history.append({
             "개월": month,
-            "현금": cash_balance,
-            "예금·적금": saving_balance,
-            "주식·ETF": investment_balance,
             "총자산": cash_balance + saving_balance + investment_balance,
         })
 
     return history[-1]["총자산"], history
 
 
-def months_to_target(
+def months_to_target_with_one_time_adjustment(
     target_amount: float,
     cash: float,
     savings_assets: float,
     investment_assets: float,
-    monthly_saving: float,
-    monthly_investment: float,
+    current_plan: dict,
+    base_plan: dict,
     savings_rate: float,
     investment_return: float,
     max_months: int = 600,
 ) -> int:
-    """예상수익률을 반영해 목표금액까지 필요한 개월 수를 찾는다."""
     current_total = cash + savings_assets + investment_assets
     if current_total >= target_amount:
         return 0
-    if monthly_saving + monthly_investment <= 0:
-        return -1
 
     saving_balance = float(savings_assets)
     investment_balance = float(investment_assets)
@@ -261,52 +349,20 @@ def months_to_target(
     investment_monthly_rate = monthly_rate(investment_return)
 
     for month in range(1, max_months + 1):
+        monthly_saving = current_plan["저축"] if month == 1 else base_plan["저축"]
+        monthly_investment = current_plan["투자"] if month == 1 else base_plan["투자"]
+
         saving_balance = saving_balance * (1 + saving_monthly_rate) + monthly_saving
         investment_balance = investment_balance * (1 + investment_monthly_rate) + monthly_investment
+
         if cash + saving_balance + investment_balance >= target_amount:
             return month
+
     return -1
-
-
-def required_monthly_contribution(
-    target_amount: float,
-    target_months: int,
-    cash: float,
-    savings_assets: float,
-    investment_assets: float,
-    saving_share: float,
-    savings_rate: float,
-    investment_return: float,
-) -> float:
-    """목표기간 내 달성을 위한 월 총 적립액을 이분탐색으로 계산한다."""
-    current_total = cash + savings_assets + investment_assets
-    if current_total >= target_amount:
-        return 0
-
-    low, high = 0.0, max(target_amount, 1.0)
-    for _ in range(70):
-        mid = (low + high) / 2
-        projected, _ = project_assets(
-            target_months,
-            cash,
-            savings_assets,
-            investment_assets,
-            mid * saving_share,
-            mid * (1 - saving_share),
-            savings_rate,
-            investment_return,
-        )
-        if projected >= target_amount:
-            high = mid
-        else:
-            low = mid
-    return math.ceil(high)
 
 
 def calculate_plan(form: dict) -> dict:
     income = form["income"]
-    fixed = form["fixed"]
-    living = form["living"]
     cash = form["cash"]
     savings_assets = form["savings_assets"]
     investment_assets = form["investment_assets"]
@@ -317,180 +373,129 @@ def calculate_plan(form: dict) -> dict:
     savings_rate = form["savings_rate"]
     investment_return = form["investment_return"]
 
+    fixed_total = sum(form["fixed_items"].values())
+    variable_total = sum(form["variable_items"].values())
+
     total_assets = cash + savings_assets + investment_assets
     net_assets = total_assets - debt
-    available_before_special = max(income - fixed - living, 0)
+
+    base_plan, emergency_ratio, adjustment_reasons = build_base_plan(
+        income=income,
+        fixed_total=fixed_total,
+        variable_total=variable_total,
+        cash=cash,
+        debt=debt,
+        total_assets=total_assets,
+        target_months=target_months,
+        risk=risk,
+    )
 
     ai_context = ask_ai_for_context(form)
     fallback_label, fallback_amount = extract_special_expense(form["request"])
+
     if ai_context:
         special_label = ai_context.get("special_event") or fallback_label
         special_amount = int(ai_context.get("special_amount") or fallback_amount or 0)
-        priority = ai_context.get("priority") or "현재 상황을 반영해 균형 있게 조정합니다."
+        priority = ai_context.get("priority") or "이번 달의 일시적인 지출만 조정하고 평소 계획은 유지합니다."
     else:
         special_label = fallback_label
         special_amount = fallback_amount
-        priority = "현재 상황, 목표 기간, 투자 성향을 함께 반영해 이번 달 계획을 조정합니다."
+        priority = "평소 저축·투자 계획을 기준으로 이번 달의 일시적인 지출만 조정합니다."
 
-    special_amount = min(max(special_amount, 0), max(income - fixed, 0))
+    special_amount = min(max(special_amount, 0), max(income - fixed_total, 0))
+    current_plan = adjust_for_special(base_plan, special_amount)
 
-    emergency_target = max((fixed + living) * 3, 1)
-    emergency_ratio = cash / emergency_target
-
-    invest_ratio = RISK_RATIOS[risk]
-    adjustment_reasons = []
-    if emergency_ratio < 0.5:
-        invest_ratio *= 0.35
-        adjustment_reasons.append("비상금 부족")
-    elif emergency_ratio < 1:
-        invest_ratio *= 0.65
-        adjustment_reasons.append("비상금 보완 필요")
-    if debt > total_assets * 0.5 and debt > 0:
-        invest_ratio *= 0.6
-        adjustment_reasons.append("부채 부담")
-    if target_months <= 12:
-        invest_ratio *= 0.55
-        adjustment_reasons.append("단기 목표")
-    if special_amount > available_before_special * 0.4 and special_amount > 0:
-        invest_ratio *= 0.65
-        adjustment_reasons.append("큰 특별지출")
-
-    after_essentials = max(income - fixed - living - special_amount, 0)
-
-    # 비상금이 부족하면 저축 비중을 높이고, 충분하면 투자 성향을 더 반영한다.
-    if emergency_ratio < 1:
-        investment = after_essentials * invest_ratio
-        saving = after_essentials * 0.70
-        if saving + investment > after_essentials * 0.92:
-            scale = (after_essentials * 0.92) / max(saving + investment, 1)
-            saving *= scale
-            investment *= scale
-    else:
-        investment = after_essentials * invest_ratio
-        saving = min(after_essentials * 0.55, after_essentials - investment)
-        if saving + investment > after_essentials * 0.92:
-            saving = max(after_essentials * 0.92 - investment, 0)
-
-    budget = {
-        "고정지출": int(round(fixed)),
-        "생활비": int(round(living)),
-        "특별지출": int(round(special_amount)),
-        "저축": int(round(max(saving, 0))),
-        "투자": int(round(max(investment, 0))),
-        "여유자금": 0,
-    }
-    budget["여유자금"] = int(income - sum(v for k, v in budget.items() if k != "여유자금"))
-
-    if budget["여유자금"] < 0:
-        shortage = -budget["여유자금"]
-        reduce_invest = min(budget["투자"], shortage)
-        budget["투자"] -= reduce_invest
-        shortage -= reduce_invest
-        reduce_saving = min(budget["저축"], shortage)
-        budget["저축"] -= reduce_saving
-        shortage -= reduce_saving
-        if shortage > 0:
-            budget["생활비"] = max(budget["생활비"] - shortage, 0)
-        budget["여유자금"] = income - sum(v for k, v in budget.items() if k != "여유자금")
-
-    monthly_total_contribution = budget["저축"] + budget["투자"]
-    saving_share = (
-        budget["저축"] / monthly_total_contribution
-        if monthly_total_contribution > 0
-        else 1.0
-    )
-
-    required_monthly = required_monthly_contribution(
-        target_amount=target_amount,
+    projected_at_target, projection_history = project_with_one_time_adjustment(
         target_months=target_months,
         cash=cash,
         savings_assets=savings_assets,
         investment_assets=investment_assets,
-        saving_share=saving_share,
+        current_plan=current_plan,
+        base_plan=base_plan,
         savings_rate=savings_rate,
         investment_return=investment_return,
     )
 
-    expected_months = months_to_target(
+    expected_months = months_to_target_with_one_time_adjustment(
         target_amount=target_amount,
         cash=cash,
         savings_assets=savings_assets,
         investment_assets=investment_assets,
-        monthly_saving=budget["저축"],
-        monthly_investment=budget["투자"],
+        current_plan=current_plan,
+        base_plan=base_plan,
         savings_rate=savings_rate,
         investment_return=investment_return,
     )
 
-    projected_at_target, projection_history = project_assets(
-        target_months,
-        cash,
-        savings_assets,
-        investment_assets,
-        budget["저축"],
-        budget["투자"],
-        savings_rate,
-        investment_return,
+    base_monthly_contribution = base_plan["저축"] + base_plan["투자"]
+    current_monthly_contribution = current_plan["저축"] + current_plan["투자"]
+    one_time_reduction = base_monthly_contribution - current_monthly_contribution
+
+    explanation = (
+        f"평소에는 매월 저축 {won(base_plan['저축'])}, 투자 {won(base_plan['투자'])}를 유지하는 계획입니다. "
+        f"이번 달에는 {special_label} {won(special_amount)}이 발생해 여유자금·투자·저축 순으로 조정했습니다. "
+        f"다음 달부터는 다시 평소 계획으로 복귀한다고 가정했습니다."
     )
 
-    if special_amount:
-        explanation = (
-            f"{special_label} {won(special_amount)}을 우선 반영한 뒤, "
-            f"저축 {won(budget['저축'])}과 투자 {won(budget['투자'])}로 나눴습니다. "
-            f"적금 연 {savings_rate:.1f}%, 투자 연 {investment_return:.1f}%의 가정 수익률을 적용하면 "
-            f"{target_months}개월 후 예상 금융자산은 약 {won(projected_at_target)}입니다."
-        )
-    else:
-        explanation = (
-            f"{risk} 성향과 비상금 수준을 반영해 저축 {won(budget['저축'])}, "
-            f"투자 {won(budget['투자'])}로 배분했습니다. "
-            f"적금 연 {savings_rate:.1f}%, 투자 연 {investment_return:.1f}%의 가정 수익률을 적용하면 "
-            f"{target_months}개월 후 예상 금융자산은 약 {won(projected_at_target)}입니다."
-        )
-
-    weekly_living = budget["생활비"] / 4.3 if budget["생활비"] else 0
-    daily_living = budget["생활비"] / 30 if budget["생활비"] else 0
-    action_2 = (
-        f"{special_label} 예산 {won(budget['특별지출'])}을 월급을 받은 당일 별도 통장이나 공간으로 옮겨 "
-        "생활비와 섞이지 않게 관리하세요."
-        if budget["특별지출"] > 0
-        else f"생활비를 주당 약 {won(weekly_living)}로 나누고, 매주 초 해당 금액만 생활비 계좌로 옮기세요."
-    )
+    weekly_food = form["variable_items"]["식비"] / 4.3
+    weekly_social = form["variable_items"]["모임·여가비"] / 4.3
+    emergency_target = (fixed_total + variable_total) * 3
 
     actions = [
         (
-            f"월급일 당일 저축 {won(budget['저축'])}을 예금·적금 계좌로 자동이체하세요. "
-            f"설정한 연 {savings_rate:.1f}% 이율은 만기까지 유지된다는 가정이므로 실제 상품 조건도 확인하세요."
-        ),
-        action_2,
-        (
-            f"이번 달 투자 한도를 {won(budget['투자'])}로 고정하고 2~4회로 나누어 투자하세요. "
-            f"연 {investment_return:.1f}%는 예상수익률일 뿐 확정수익이 아니므로 단기 지출 예정 자금은 투자하지 마세요."
+            f"월급일에 이번 달 저축 {won(current_plan['저축'])}과 투자 {won(current_plan['투자'])}를 먼저 분리하세요. "
+            f"평소 기준은 저축 {won(base_plan['저축'])}, 투자 {won(base_plan['투자'])}이며 이번 달만 일시적으로 조정된 금액입니다."
         ),
         (
-            f"생활비는 하루 평균 약 {won(daily_living)}를 기준으로 사용하고, 매주 말 실제 지출과 비교해 "
-            "다음 주 한도를 조정하세요."
+            f"{special_label} 비용 {won(special_amount)}은 별도 통장이나 봉투에 즉시 분리하세요. "
+            "생활비 계좌와 섞이지 않게 해야 추가 지출을 막을 수 있습니다."
+            if special_amount > 0
+            else "이번 달 특별지출이 없으므로 평소 월급 계획을 그대로 실행하세요."
         ),
         (
-            f"월말에 현금성 자산이 권장 비상금 {won(emergency_target)}의 "
-            f"{emergency_ratio * 100:.0f}% 수준에서 얼마나 개선됐는지 확인하고, 다음 달 저축·투자 비중을 다시 설정하세요."
+            f"식비는 주당 약 {won(weekly_food)}, 모임·여가비는 주당 약 {won(weekly_social)}를 한도로 설정하세요. "
+            "주간 단위로 관리하면 월말 초과지출을 줄이기 쉽습니다."
+        ),
+        (
+            f"이번 달 투자금은 {won(current_plan['투자'])}까지만 집행하고, 다음 달에는 평소 투자금 "
+            f"{won(base_plan['투자'])}로 복귀하세요. 연 {investment_return:.1f}%는 확정수익이 아닌 계획용 가정입니다."
+        ),
+        (
+            f"월말에 현금성 자산이 권장 비상금 {won(emergency_target)} 대비 "
+            f"{emergency_ratio * 100:.0f}% 수준인지 확인하세요. 특별지출이 반복되면 다음 달 평소 계획 자체를 다시 조정해야 합니다."
         ),
     ]
+
+    comparison_rows = []
+    for category in CATEGORY_ORDER:
+        base_value = base_plan[category]
+        current_value = current_plan[category]
+        comparison_rows.append({
+            "항목": category,
+            "평소 계획": base_value,
+            "이번 달 계획": current_value,
+            "증감": current_value - base_value,
+        })
 
     return {
         "total_assets": total_assets,
         "net_assets": net_assets,
-        "available": max(income - fixed - living - special_amount, 0),
+        "fixed_total": fixed_total,
+        "variable_total": variable_total,
         "emergency_ratio": emergency_ratio,
         "emergency_target": emergency_target,
         "special_label": special_label,
         "special_amount": special_amount,
         "priority": priority,
-        "budget": budget,
-        "required_monthly": required_monthly,
-        "expected_months": expected_months,
+        "base_plan": base_plan,
+        "current_plan": current_plan,
+        "comparison_rows": comparison_rows,
+        "base_monthly_contribution": base_monthly_contribution,
+        "current_monthly_contribution": current_monthly_contribution,
+        "one_time_reduction": one_time_reduction,
         "projected_at_target": projected_at_target,
         "projection_history": projection_history,
+        "expected_months": expected_months,
         "explanation": explanation,
         "actions": actions,
         "adjustment_reasons": adjustment_reasons,
@@ -503,8 +508,8 @@ def home():
         """
         <div class="hero">
             <h1>💸 월급아 어디가니?</h1>
-            <p><b>현재 자산과 이번 달 상황을 입력하면<br>
-            AI가 생활비·저축·투자 계획을 설계해 드립니다.</b></p>
+            <p><b>평소 월급 계획을 만들고,<br>
+            이번 달 달라진 상황까지 반영해 드립니다.</b></p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -513,17 +518,17 @@ def home():
     c1, c2, c3 = st.columns(3)
     with c1:
         st.markdown(
-            '<div class="info-card"><h4>🧾 현재 상태</h4><div class="muted">현금·적금·주식·대출을 한눈에 정리합니다.</div></div>',
+            '<div class="info-card"><h4>📅 평소 계획</h4><div class="muted">매월 유지할 저축·투자 기준을 만듭니다.</div></div>',
             unsafe_allow_html=True,
         )
     with c2:
         st.markdown(
-            '<div class="info-card"><h4>🗺️ 맞춤 배분</h4><div class="muted">월급을 생활비·저축·투자로 나눠드립니다.</div></div>',
+            '<div class="info-card"><h4>✨ 이번 달 조정</h4><div class="muted">생신·여행·병원비 같은 일시 지출을 반영합니다.</div></div>',
             unsafe_allow_html=True,
         )
     with c3:
         st.markdown(
-            '<div class="info-card"><h4>📈 목표 예상</h4><div class="muted">적금 이율과 투자 기대수익률을 반영합니다.</div></div>',
+            '<div class="info-card"><h4>📈 장기 목표</h4><div class="muted">다음 달부터 평소 계획으로 복귀해 목표를 계산합니다.</div></div>',
             unsafe_allow_html=True,
         )
 
@@ -537,23 +542,43 @@ def home():
 
 def input_form():
     st.title("내 월급 계획 만들기")
-    st.caption("핵심 숫자와 이번 달 고민만 입력하면 됩니다.")
+    st.caption("평소 지출과 이번 달의 달라진 상황을 함께 입력하세요.")
 
     with st.form("salary_form"):
-        st.subheader("1. 월급과 지출")
-        c1, c2, c3 = st.columns(3)
-        income = c1.number_input("월 실수령액", min_value=0, value=3_500_000, step=100_000, format="%d")
-        fixed = c2.number_input("월 고정지출", min_value=0, value=800_000, step=50_000, format="%d")
-        living = c3.number_input("월 평균 생활비", min_value=0, value=700_000, step=50_000, format="%d")
+        st.subheader("1. 월급")
+        income = st.number_input(
+            "월 실수령액",
+            min_value=0,
+            value=3_500_000,
+            step=100_000,
+            format="%d",
+        )
 
-        st.subheader("2. 현재 자산")
+        st.subheader("2. 평소 고정지출")
+        c1, c2 = st.columns(2)
+        housing = c1.number_input("주거비·관리비", min_value=0, value=400_000, step=50_000, format="%d")
+        telecom = c2.number_input("통신비", min_value=0, value=80_000, step=10_000, format="%d")
+        transport = c1.number_input("교통비", min_value=0, value=150_000, step=10_000, format="%d")
+        insurance = c2.number_input("보험료", min_value=0, value=100_000, step=10_000, format="%d")
+        subscriptions = c1.number_input("구독료", min_value=0, value=30_000, step=10_000, format="%d")
+        other_fixed = c2.number_input("기타 고정지출", min_value=0, value=40_000, step=10_000, format="%d")
+
+        st.subheader("3. 평소 생활비")
+        c1, c2 = st.columns(2)
+        food = c1.number_input("식비", min_value=0, value=350_000, step=20_000, format="%d")
+        cafe = c2.number_input("카페·간식", min_value=0, value=100_000, step=10_000, format="%d")
+        social = c1.number_input("모임·여가비", min_value=0, value=150_000, step=20_000, format="%d")
+        shopping = c2.number_input("쇼핑·생활용품", min_value=0, value=100_000, step=20_000, format="%d")
+        other_variable = c1.number_input("기타 생활비", min_value=0, value=0, step=10_000, format="%d")
+
+        st.subheader("4. 현재 자산")
         c1, c2 = st.columns(2)
         cash = c1.number_input("현금·입출금 통장", min_value=0, value=3_000_000, step=100_000, format="%d")
         savings_assets = c2.number_input("예금·적금", min_value=0, value=5_000_000, step=100_000, format="%d")
         investment_assets = c1.number_input("주식·ETF", min_value=0, value=2_000_000, step=100_000, format="%d")
         debt = c2.number_input("대출 잔액", min_value=0, value=0, step=100_000, format="%d")
 
-        st.subheader("3. 수익률 가정")
+        st.subheader("5. 수익률 가정")
         c1, c2 = st.columns(2)
         savings_rate = c1.number_input(
             "예금·적금 연 이율(%)",
@@ -561,7 +586,7 @@ def input_form():
             max_value=20.0,
             value=4.0,
             step=0.1,
-            help="현재 가입 상품 또는 예상 상품의 세전 연 이율을 입력하세요.",
+            help="현재 또는 예상 상품의 세전 연 이율을 입력하세요.",
         )
         investment_return = c2.number_input(
             "투자 연평균 기대수익률(%)",
@@ -569,46 +594,63 @@ def input_form():
             max_value=30.0,
             value=6.0,
             step=0.5,
-            help="확정 수익률이 아닌 장기 계획용 가정입니다. 보수적으로 입력하는 것을 권장합니다.",
+            help="확정수익률이 아닌 장기 계획용 가정값입니다.",
         )
-        st.caption("투자 기대수익률은 미래 수익을 보장하지 않는 가정값입니다. 단기 목표일수록 낮게 설정하세요.")
 
-        st.subheader("4. 목표와 투자 성향")
+        st.subheader("6. 목표와 투자 성향")
         c1, c2 = st.columns(2)
         goal_name = c1.text_input("재무 목표", value="목돈 마련")
         target_amount = c2.number_input("목표 금액", min_value=0, value=50_000_000, step=1_000_000, format="%d")
         target_months = c1.number_input("목표 기간(개월)", min_value=1, value=36, step=1)
         risk = c2.selectbox("투자 성향", list(RISK_RATIOS.keys()), index=2)
 
-        st.subheader("5. AI에게 자유롭게 요청하기")
+        st.subheader("7. 이번 달 달라진 상황")
         request = st.text_area(
-            "이번 달 상황이나 고민을 자유롭게 적어주세요.",
-            value="이번 달은 부모님 생신이라 50만 원 정도 써야 해. 내 상황에 맞게 이번 달 계획을 짜줘.",
+            "이번 달에만 발생한 지출이나 고민을 적어주세요.",
+            value="이번 달은 부모님 생신이라 50만 원 정도 추가로 필요해. 평소 목표는 유지하면서 이번 달만 조정해줘.",
             height=120,
-            help="예: 다음 달 여행을 가는데 저축과 투자 비중을 어떻게 조정할까?",
+            help="예: 다음 달 여행 예약금으로 이번 달 30만 원이 더 필요해.",
         )
 
-        submitted = st.form_submit_button("AI에게 계획 받기", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("평소 계획과 이번 달 계획 비교하기", type="primary", use_container_width=True)
 
     if st.button("← 시작화면으로"):
         st.session_state.page = "home"
         st.rerun()
 
     if submitted:
+        fixed_items = {
+            "주거비·관리비": int(housing),
+            "통신비": int(telecom),
+            "교통비": int(transport),
+            "보험료": int(insurance),
+            "구독료": int(subscriptions),
+            "기타 고정지출": int(other_fixed),
+        }
+        variable_items = {
+            "식비": int(food),
+            "카페·간식": int(cafe),
+            "모임·여가비": int(social),
+            "쇼핑·생활용품": int(shopping),
+            "기타 생활비": int(other_variable),
+        }
+
         if income <= 0:
             st.error("월 실수령액을 입력해 주세요.")
             return
-        if fixed + living > income:
-            st.error("고정지출과 생활비가 월급보다 큽니다. 입력값을 확인해 주세요.")
+
+        if sum(fixed_items.values()) + sum(variable_items.values()) > income:
+            st.error("평소 고정지출과 생활비 합계가 월급보다 큽니다. 입력값을 확인해 주세요.")
             return
+
         if not request.strip():
-            st.error("이번 달 상황이나 고민을 입력해 주세요.")
+            st.error("이번 달 달라진 상황을 입력해 주세요.")
             return
 
         form_data = {
             "income": int(income),
-            "fixed": int(fixed),
-            "living": int(living),
+            "fixed_items": fixed_items,
+            "variable_items": variable_items,
             "cash": int(cash),
             "savings_assets": int(savings_assets),
             "investment_assets": int(investment_assets),
@@ -621,6 +663,7 @@ def input_form():
             "risk": risk,
             "request": request.strip(),
         }
+
         st.session_state.form_data = form_data
         st.session_state.result = calculate_plan(form_data)
         st.session_state.page = "result"
@@ -630,70 +673,108 @@ def input_form():
 def result_page():
     form = st.session_state.form_data
     result = st.session_state.result
+
     if not form or not result:
         st.session_state.page = "form"
         st.rerun()
 
-    st.title("월급의 행방을 찾았어요! 🔎")
-    st.caption("입력한 상황과 수익률 가정을 반영한 이번 달 추천안입니다.")
+    st.title("평소 계획과 이번 달 계획을 비교했어요 🔎")
+    st.caption("이번 달만 조정하고, 다음 달부터는 평소 계획으로 복귀하는 기준입니다.")
 
     c1, c2, c3 = st.columns(3)
     c1.metric("총자산", won(result["total_assets"]))
     c2.metric("순자산", won(result["net_assets"]))
-    c3.metric("특별지출 반영 후 가용금액", won(result["available"]))
-
-    if result["ai_used"]:
-        st.success("AI가 자유 입력의 특별 상황과 우선순위를 분석했습니다.")
-    else:
-        st.info("데모 분석 모드입니다. API 키를 연결하면 자유 입력을 더 정교하게 해석합니다.")
+    c3.metric("이번 달 특별지출", won(result["special_amount"]))
 
     st.markdown(
         f"""
         <div class="result-box">
         <b>AI 한 줄 진단</b><br>
-        {result['priority']} 비상금은 권장 3개월치의 약 {result['emergency_ratio']*100:.0f}% 수준입니다.
+        {result['priority']} 현재 비상금은 권장 3개월치의 약 {result['emergency_ratio'] * 100:.0f}% 수준입니다.
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    if result["adjustment_reasons"]:
-        st.caption("투자 비중 조정 요인: " + ", ".join(result["adjustment_reasons"]))
+    st.subheader("평소 계획 vs 이번 달 계획")
 
-    st.subheader("이번 달 추천 월급 배분")
-    chart_df = pd.DataFrame(
-        [{"항목": key, "금액": result["budget"][key]} for key in CATEGORY_ORDER if result["budget"][key] > 0]
+    comparison_df = pd.DataFrame(result["comparison_rows"])
+    display_df = comparison_df.copy()
+    display_df["평소 계획"] = display_df["평소 계획"].map(won)
+    display_df["이번 달 계획"] = display_df["이번 달 계획"].map(won)
+    display_df["증감"] = display_df["증감"].map(
+        lambda x: f"+{won(x)}" if x > 0 else won(x)
     )
-    fig = px.pie(chart_df, names="항목", values="금액", hole=0.55)
-    fig.update_traces(textposition="inside", textinfo="percent+label")
-    fig.update_layout(margin=dict(t=20, b=20, l=20, r=20), legend_title_text="")
+    st.dataframe(display_df, hide_index=True, use_container_width=True)
+
+    chart_df = pd.DataFrame([
+        {
+            "항목": row["항목"],
+            "금액": row["평소 계획"],
+            "구분": "평소 계획",
+        }
+        for row in result["comparison_rows"]
+        if row["평소 계획"] > 0
+    ] + [
+        {
+            "항목": row["항목"],
+            "금액": row["이번 달 계획"],
+            "구분": "이번 달 계획",
+        }
+        for row in result["comparison_rows"]
+        if row["이번 달 계획"] > 0
+    ])
+
+    fig = px.bar(
+        chart_df,
+        x="항목",
+        y="금액",
+        color="구분",
+        barmode="group",
+    )
+    fig.update_layout(
+        margin=dict(t=20, b=20, l=20, r=20),
+        yaxis_title="금액(원)",
+        xaxis_title="",
+    )
     st.plotly_chart(fig, use_container_width=True)
 
-    table = []
-    for category in CATEGORY_ORDER:
-        amount = result["budget"][category]
-        table.append({
-            "항목": category,
-            "추천 금액": won(amount),
-            "월급 대비": f"{amount / form['income'] * 100:.1f}%",
-        })
-    st.dataframe(pd.DataFrame(table), hide_index=True, use_container_width=True)
+    st.subheader("이번 달 조정 핵심")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("평소 저축·투자", won(result["base_monthly_contribution"]))
+    c2.metric("이번 달 저축·투자", won(result["current_monthly_contribution"]))
+    c3.metric("이번 달 일시 감소", won(result["one_time_reduction"]))
 
-    st.subheader("왜 이렇게 나눴나요?")
     st.write(result["explanation"])
 
-    st.subheader("목표 달성 분석")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("목표기간 내 필요 월 적립액", won(result["required_monthly"]))
+    st.subheader("세부 지출 확인")
+    fixed_df = pd.DataFrame(
+        [{"항목": k, "금액": won(v)} for k, v in form["fixed_items"].items()]
+    )
+    variable_df = pd.DataFrame(
+        [{"항목": k, "금액": won(v)} for k, v in form["variable_items"].items()]
+    )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**고정지출**")
+        st.dataframe(fixed_df, hide_index=True, use_container_width=True)
+    with c2:
+        st.markdown("**생활비**")
+        st.dataframe(variable_df, hide_index=True, use_container_width=True)
+
+    st.subheader("장기 목표 예상")
+    c1, c2 = st.columns(2)
     expected = (
         f"약 {result['expected_months']}개월"
         if result["expected_months"] >= 0
         else "50년 내 달성 어려움"
     )
-    c2.metric("추천안 기준 예상 기간", expected)
-    c3.metric(f"{form['target_months']}개월 후 예상자산", won(result["projected_at_target"]))
+    c1.metric("목표 달성 예상 기간", expected)
+    c2.metric(f"{form['target_months']}개월 후 예상자산", won(result["projected_at_target"]))
+
     st.caption(
-        f"목표: {form['goal_name']} · {won(form['target_amount'])} | "
+        f"이번 달은 조정 계획, 다음 달부터는 평소 계획으로 계산 | "
         f"적금 연 {form['savings_rate']:.1f}% · 투자 연 {form['investment_return']:.1f}% 가정"
     )
 
@@ -722,14 +803,15 @@ def result_page():
         st.markdown(f"**{idx}. {action}**")
 
     st.warning(
-        "적금 이율은 실제 상품의 세금·우대조건에 따라 달라질 수 있고, 투자 기대수익률은 미래 수익을 보장하지 않습니다. "
-        "본 결과는 개인 예산 설계를 위한 참고용입니다."
+        "적금 이율은 실제 상품의 세금·우대조건에 따라 달라질 수 있고, "
+        "투자 기대수익률은 미래 수익을 보장하지 않습니다. 본 결과는 참고용입니다."
     )
 
     c1, c2 = st.columns(2)
-    if c1.button("입력값 수정하기", use_container_width=True):
+    if c1.button("세부 항목 수정하기", use_container_width=True):
         st.session_state.page = "form"
         st.rerun()
+
     if c2.button("처음부터 다시", use_container_width=True):
         st.session_state.page = "home"
         st.session_state.result = None
@@ -738,6 +820,7 @@ def result_page():
 
 
 init_state()
+
 if st.session_state.page == "home":
     home()
 elif st.session_state.page == "form":
