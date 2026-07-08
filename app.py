@@ -1054,6 +1054,88 @@ def build_comparison_chart(result: dict):
     return fig
 
 
+def build_delta_chart(result: dict):
+    rows = list(reversed(result["comparison_rows"]))
+    categories = [row["항목"] for row in rows]
+    deltas = [row["증감"] for row in rows]
+    base_values = [row["평소 계획"] for row in rows]
+    current_values = [row["이번 달 계획"] for row in rows]
+    colors = [
+        "#C01048" if value > 0 else "#175CD3" if value < 0 else "#98A2B3"
+        for value in deltas
+    ]
+    labels = [
+        f"+{won(value)}" if value > 0 else f"-{won(abs(value))}" if value < 0 else "변화 없음"
+        for value in deltas
+    ]
+
+    max_abs = max([abs(value) for value in deltas] + [1])
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        y=categories,
+        x=deltas,
+        orientation="h",
+        marker_color=colors,
+        text=labels,
+        textposition="outside",
+        cliponaxis=False,
+        customdata=list(zip(base_values, current_values)),
+        hovertemplate=(
+            "%{y}<br>평소 계획: %{customdata[0]:,.0f}원"
+            "<br>이번 달 계획: %{customdata[1]:,.0f}원"
+            "<br>증감: %{x:,.0f}원<extra></extra>"
+        ),
+    ))
+    fig.add_vline(x=0, line_width=1, line_color="#98A2B3")
+    fig.update_layout(
+        title="평소 대비 증감",
+        height=390,
+        xaxis_title="감소 ← 0 → 증가",
+        yaxis_title="",
+        margin=dict(t=58, b=40, l=20, r=70),
+        showlegend=False,
+    )
+    fig.update_xaxes(
+        range=[-max_abs * 1.35, max_abs * 1.35],
+        zeroline=True,
+        tickformat=",",
+    )
+    return fig
+
+
+def build_variable_reduction_chart(result: dict):
+    reductions = result.get("variable_reductions", [])
+    if not reductions:
+        return None
+
+    rows = list(reversed(reductions))
+    categories = [row["항목"] for row in rows]
+    values = [row["조정액"] for row in rows]
+    labels = [f"-{won(value)}" for value in values]
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        y=categories,
+        x=values,
+        orientation="h",
+        marker_color="#175CD3",
+        text=labels,
+        textposition="outside",
+        cliponaxis=False,
+        hovertemplate="%{y}<br>줄인 금액: %{x:,.0f}원<extra></extra>",
+    ))
+    fig.update_layout(
+        title="생활비에서 줄인 금액",
+        height=max(280, 72 * len(rows) + 120),
+        xaxis_title="절감액(원)",
+        yaxis_title="",
+        margin=dict(t=58, b=35, l=20, r=70),
+        showlegend=False,
+    )
+    fig.update_xaxes(tickformat=",")
+    return fig
+
+
 def build_projection_chart(result: dict, form: dict):
     history_df = pd.DataFrame(result["projection_history"])
     fig = go.Figure()
@@ -1127,35 +1209,43 @@ def result_page():
         render_plan_card("다음 달 복귀 계획", result["base_plan"])
 
     st.markdown("### 평소 대비 변화")
-    for row in result["comparison_rows"]:
-        delta = row["증감"]
-        if delta > 0:
-            delta_class = "delta-plus"
-            delta_text = f"+{won(delta)}"
-        elif delta < 0:
-            delta_class = "delta-minus"
-            delta_text = f"-{won(abs(delta))}"
-        else:
-            delta_class = "delta-zero"
-            delta_text = "변화 없음"
-        st.markdown(
-            f"""
-            <div class="plan-card">
-                <div class="plan-row"><span><b>{row['항목']}</b></span><span class="{delta_class}">{delta_text}</span></div>
-                <div class="plan-row"><span>평소 계획</span><span>{won(row['평소 계획'])}</span></div>
-                <div class="plan-row"><span>이번 달 계획</span><span>{won(row['이번 달 계획'])}</span></div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    st.caption("0원을 기준으로 왼쪽은 줄어든 항목, 오른쪽은 늘어난 항목입니다.")
+    st.plotly_chart(build_delta_chart(result), use_container_width=True)
+
+    with st.expander("항목별 변화 자세히 보기", expanded=False):
+        for row in result["comparison_rows"]:
+            delta = row["증감"]
+            if delta > 0:
+                delta_class = "delta-plus"
+                delta_text = f"+{won(delta)}"
+            elif delta < 0:
+                delta_class = "delta-minus"
+                delta_text = f"-{won(abs(delta))}"
+            else:
+                delta_class = "delta-zero"
+                delta_text = "변화 없음"
+            st.markdown(
+                f"""
+                <div class="plan-card">
+                    <div class="plan-row"><span><b>{row['항목']}</b></span><span class="{delta_class}">{delta_text}</span></div>
+                    <div class="plan-row"><span>평소 계획</span><span>{won(row['평소 계획'])}</span></div>
+                    <div class="plan-row"><span>이번 달 계획</span><span>{won(row['이번 달 계획'])}</span></div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
     if result.get("variable_reductions"):
         st.markdown("### 생활비 조정 내역")
+        reduction_chart = build_variable_reduction_chart(result)
+        if reduction_chart is not None:
+            st.plotly_chart(reduction_chart, use_container_width=True)
         reduction_df = pd.DataFrame([
             {"항목": row["항목"], "줄인 금액": won(row["조정액"]), "기준": row["이유"]}
             for row in result["variable_reductions"]
         ])
-        st.dataframe(reduction_df, hide_index=True, use_container_width=True)
+        with st.expander("생활비 조정 표로 보기", expanded=False):
+            st.dataframe(reduction_df, hide_index=True, use_container_width=True)
 
     if result.get("uncovered_amount", 0) > 0:
         st.error(f"아직 조정이 필요한 금액이 {won(result['uncovered_amount'])} 남았습니다. 줄일 수 있는 생활비 항목을 더 체크하거나 최소 유지금액을 낮춰 주세요.")
