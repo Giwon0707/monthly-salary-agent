@@ -346,30 +346,78 @@ def build_base_plan(
     return plan, emergency_ratio, reasons
 
 
-def adjust_for_special(base_plan: dict, special_amount: int) -> dict:
+def adjust_for_special(
+    base_plan: dict,
+    special_amount: int,
+    variable_items: list[dict] | None = None,
+    reduction_rules: list[dict] | None = None,
+) -> tuple[dict, list[dict], list[dict], int]:
+    """
+    이번 달 특별지출을 반영한다.
+    조정 순서: 여유자금 → 사용자가 체크한 생활비 항목 → 투자 → 저축.
+    고정지출은 건드리지 않고, 생활비는 사용자가 허용한 항목과 한도 안에서만 먼저 줄인다.
+    """
     plan = dict(base_plan)
     plan["특별지출"] = max(special_amount, 0)
 
+    current_variable_items = [dict(item) for item in (variable_items or [])]
+    reductions: list[dict] = []
     remaining = special_amount
 
     use_buffer = min(plan["여유자금"], remaining)
     plan["여유자금"] -= use_buffer
     remaining -= use_buffer
+    if use_buffer > 0:
+        reductions.append({
+            "항목": "여유자금",
+            "조정액": use_buffer,
+            "이유": "가장 먼저 사용하는 완충 금액",
+        })
+
+    rules = sorted(reduction_rules or [], key=lambda x: int(x.get("priority", 99)))
+    item_by_id = {item.get("id"): item for item in current_variable_items}
+    for rule in rules:
+        if remaining <= 0:
+            break
+        item = item_by_id.get(rule.get("id"))
+        if not item:
+            continue
+        original_amount = int(item.get("amount", 0))
+        max_cut_rate = float(rule.get("max_cut_rate", 0))
+        max_cut = max(int(round(original_amount * max_cut_rate)), 0)
+        cut = min(max_cut, remaining, original_amount)
+        if cut <= 0:
+            continue
+        item["amount"] = original_amount - cut
+        plan["생활비"] = max(plan["생활비"] - cut, 0)
+        remaining -= cut
+        reductions.append({
+            "항목": item.get("name", "생활비"),
+            "조정액": cut,
+            "이유": f"사용자가 줄이기 허용한 생활비 항목, 최대 {max_cut_rate * 100:.0f}% 한도",
+        })
 
     use_investment = min(plan["투자"], remaining)
     plan["투자"] -= use_investment
     remaining -= use_investment
+    if use_investment > 0:
+        reductions.append({
+            "항목": "투자",
+            "조정액": use_investment,
+            "이유": "이번 달만 일시적으로 축소하고 다음 달 복귀",
+        })
 
     use_saving = min(plan["저축"], remaining)
     plan["저축"] -= use_saving
     remaining -= use_saving
+    if use_saving > 0:
+        reductions.append({
+            "항목": "저축",
+            "조정액": use_saving,
+            "이유": "마지막으로 줄이는 핵심 목표 금액",
+        })
 
-    if remaining > 0:
-        reduce_variable = min(plan["생활비"], remaining)
-        plan["생활비"] -= reduce_variable
-        remaining -= reduce_variable
-
-    return plan
+    return plan, current_variable_items, reductions, remaining
 
 
 def project_with_one_time_adjustment(
@@ -524,10 +572,15 @@ def calculate_plan(form: dict) -> dict:
     else:
         special_label = fallback_label
         special_amount = fallback_amount
-        priority = "평소 저축·투자 계획을 기준으로 이번 달의 일시적인 지출만 조정합니다."
+        priority = "여유자금과 조정 가능한 생활비를 먼저 활용하고, 부족한 부분만 투자·저축에서 조정합니다."
 
     special_amount = min(max(special_amount, 0), max(income - fixed_total, 0))
-    current_plan = adjust_for_special(base_plan, special_amount)
+    current_plan, current_variable_items, variable_reductions, uncovered_amount = adjust_for_special(
+        base_plan=base_plan,
+        special_amount=special_amount,
+        variable_items=form["variable_items"],
+        reduction_rules=form.get("reduction_rules", []),
+    )
 
     projected_at_target, projection_history = project_with_one_time_adjustment(
         target_months=target_months,
@@ -609,7 +662,7 @@ def calculate_plan(form: dict) -> dict:
 
     explanation = (
         f"평소에는 매월 저축 {won(base_plan['저축'])}, 투자 {won(base_plan['투자'])}를 유지하는 계획입니다. "
-        f"이번 달에는 {special_label} {won(special_amount)}이 발생해 여유자금·투자·저축 순으로 조정했습니다. "
+        f"이번 달에는 {special_label} {won(special_amount)}이 발생해 여유자금·체크한 생활비·투자·저축 순으로 조정했습니다. "
         f"다음 달부터는 다시 평소 계획으로 복귀한다고 가정했습니다."
     )
 
@@ -640,6 +693,9 @@ def calculate_plan(form: dict) -> dict:
         "explanation": explanation,
         "actions": actions,
         "adjustment_reasons": adjustment_reasons,
+        "current_variable_items": current_variable_items,
+        "variable_reductions": variable_reductions,
+        "uncovered_amount": uncovered_amount,
         "ai_used": ai_context is not None,
         "status": status,
         "diagnosis_summary": diagnosis_summary,
@@ -758,6 +814,91 @@ def home():
     st.caption("입력 정보는 현재 세션에서만 사용되며 별도로 저장하지 않습니다.")
 
 
+def default_cut_rate_for_item(name: str) -> int:
+    if any(keyword in name for keyword in ["카페", "간식"]):
+        return 40
+    if any(keyword in name for keyword in ["모임", "여가", "데이트"]):
+        return 30
+    if any(keyword in name for keyword in ["쇼핑", "생활용품"]):
+        return 25
+    if any(keyword in name for keyword in ["식비", "식", "밥"]):
+        return 10
+    return 20
+
+
+def default_priority_for_item(name: str) -> int:
+    if any(keyword in name for keyword in ["카페", "간식"]):
+        return 1
+    if any(keyword in name for keyword in ["모임", "여가", "데이트"]):
+        return 2
+    if any(keyword in name for keyword in ["쇼핑", "생활용품"]):
+        return 3
+    if any(keyword in name for keyword in ["식비", "식", "밥"]):
+        return 4
+    return 5
+
+
+def default_check_for_item(name: str) -> bool:
+    return any(keyword in name for keyword in ["식비", "식", "밥", "카페", "간식", "모임", "여가", "데이트", "쇼핑", "생활용품"])
+
+
+def render_reduction_rules(variable_items: list[dict]) -> list[dict]:
+    st.markdown("**이번 달 줄일 수 있는 생활비 항목**")
+    st.caption("특별지출이 생겼을 때 먼저 줄여도 되는 항목을 체크하세요. 고정지출은 조정하지 않습니다.")
+
+    rules: list[dict] = []
+    adjustable_items = [item for item in variable_items if int(item.get("amount", 0)) > 0 and item.get("name")]
+    if not adjustable_items:
+        st.info("금액이 입력된 생활비 항목이 있으면 조정 우선순위를 설정할 수 있습니다.")
+        return rules
+
+    for item in adjustable_items:
+        item_id = item["id"]
+        name = item.get("name", "생활비")
+        amount = int(item.get("amount", 0))
+        cols = st.columns([1.5, 1.15, 0.9])
+        checked = cols[0].checkbox(
+            f"{name} 줄이기 허용",
+            value=default_check_for_item(name),
+            key=f"cut_enable_{item_id}",
+        )
+        max_cut_rate = cols[1].slider(
+            "최대 조정률",
+            min_value=0,
+            max_value=50,
+            value=default_cut_rate_for_item(name),
+            step=5,
+            key=f"cut_rate_{item_id}",
+            disabled=not checked,
+        )
+        priority = cols[2].number_input(
+            "우선순위",
+            min_value=1,
+            max_value=10,
+            value=default_priority_for_item(name),
+            step=1,
+            key=f"cut_priority_{item_id}",
+            disabled=not checked,
+        )
+        if checked and max_cut_rate > 0:
+            rules.append({
+                "id": item_id,
+                "name": name,
+                "amount": amount,
+                "max_cut_rate": max_cut_rate / 100,
+                "priority": int(priority),
+            })
+
+    if rules:
+        ordered = sorted(rules, key=lambda x: x["priority"])
+        order_text = " → ".join([rule["name"] for rule in ordered])
+        st.caption(f"조정 순서: 여유자금 → {order_text} → 투자 → 저축")
+    else:
+        st.caption("조정 순서: 여유자금 → 투자 → 저축")
+
+    return rules
+
+
 def input_form():
     st.title("내 월급 계획 만들기")
     st.caption("필수 정보는 간단히, 세부 지출은 원하는 만큼 직접 추가·삭제하세요.")
@@ -774,6 +915,8 @@ def input_form():
         fixed_items = render_item_editor("fixed_items_state", "고정지출", "+ 고정지출 항목 추가")
         st.divider()
         variable_items = render_item_editor("variable_items_state", "생활비", "+ 생활비 항목 추가")
+        st.divider()
+        reduction_rules = render_reduction_rules(variable_items)
 
     with st.expander("3. 현재 자산과 수익률 가정", expanded=False):
         c1, c2 = st.columns(2)
@@ -806,7 +949,7 @@ def input_form():
     if remaining < 0:
         st.error("평소 고정지출과 생활비 합계가 월급보다 큽니다. 항목 금액을 조정해 주세요.")
 
-    submitted = st.button("평소 계획과 이번 달 계획 비교하기", type="primary", use_container_width=True)
+    submitted = st.button("이번 달 계획하기", type="primary", use_container_width=True)
 
     c1, c2 = st.columns(2)
     if c1.button("← 시작화면으로", use_container_width=True):
@@ -835,6 +978,7 @@ def input_form():
             "income": int(income),
             "fixed_items": cleaned_fixed,
             "variable_items": cleaned_variable,
+            "reduction_rules": reduction_rules,
             "cash": int(cash),
             "savings_assets": int(savings_assets),
             "investment_assets": int(investment_assets),
@@ -995,19 +1139,30 @@ def result_page():
             unsafe_allow_html=True,
         )
 
-    st.markdown("### 시각화")
+    if result.get("variable_reductions"):
+        st.markdown("### 생활비 조정 내역")
+        reduction_df = pd.DataFrame([
+            {"항목": row["항목"], "줄인 금액": won(row["조정액"]), "기준": row["이유"]}
+            for row in result["variable_reductions"]
+        ])
+        st.dataframe(reduction_df, hide_index=True, use_container_width=True)
+
+    if result.get("uncovered_amount", 0) > 0:
+        st.error(f"아직 조정이 필요한 금액이 {won(result['uncovered_amount'])} 남았습니다. 줄일 수 있는 생활비 항목을 더 체크하거나 조정률을 높여 주세요.")
+
+    st.markdown("### 월급 흐름")
     st.plotly_chart(build_donut_chart(result), use_container_width=True)
     st.plotly_chart(build_comparison_chart(result), use_container_width=True)
 
     st.markdown("### 세부 지출 확인")
     fixed_df = pd.DataFrame([{"항목": item["name"], "금액": won(item["amount"])} for item in form["fixed_items"]])
-    variable_df = pd.DataFrame([{"항목": item["name"], "금액": won(item["amount"])} for item in form["variable_items"]])
+    variable_df = pd.DataFrame([{"항목": item["name"], "이번 달 금액": won(item["amount"])} for item in result.get("current_variable_items", form["variable_items"])])
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("**고정지출**")
         st.dataframe(fixed_df, hide_index=True, use_container_width=True)
     with c2:
-        st.markdown("**생활비**")
+        st.markdown("**이번 달 생활비**")
         st.dataframe(variable_df, hide_index=True, use_container_width=True)
 
     st.markdown("### 장기 목표 예상")
