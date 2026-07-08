@@ -383,9 +383,10 @@ def adjust_for_special(
         if not item:
             continue
         original_amount = int(item.get("amount", 0))
-        max_cut_rate = float(rule.get("max_cut_rate", 0))
-        max_cut = max(int(round(original_amount * max_cut_rate)), 0)
-        cut = min(max_cut, remaining, original_amount)
+        floor_amount = max(int(rule.get("floor_amount", 0)), 0)
+        floor_amount = min(floor_amount, original_amount)
+        max_cut = max(original_amount - floor_amount, 0)
+        cut = min(max_cut, remaining)
         if cut <= 0:
             continue
         item["amount"] = original_amount - cut
@@ -394,7 +395,7 @@ def adjust_for_special(
         reductions.append({
             "항목": item.get("name", "생활비"),
             "조정액": cut,
-            "이유": f"사용자가 줄이기 허용한 생활비 항목, 최대 {max_cut_rate * 100:.0f}% 한도",
+            "이유": f"최소 유지금액 {won(floor_amount)} 기준",
         })
 
     use_investment = min(plan["투자"], remaining)
@@ -814,16 +815,24 @@ def home():
     st.caption("입력 정보는 현재 세션에서만 사용되며 별도로 저장하지 않습니다.")
 
 
-def default_cut_rate_for_item(name: str) -> int:
+def default_floor_amount_for_item(name: str, amount: int) -> int:
+    """
+    사용자가 특별지출이 있어도 최소한 유지하고 싶은 생활비 하한 금액.
+    퍼센트 조정보다 실제 돈 관리 감각에 가까운 방식이다.
+    """
+    if amount <= 0:
+        return 0
     if any(keyword in name for keyword in ["카페", "간식"]):
-        return 40
-    if any(keyword in name for keyword in ["모임", "여가", "데이트"]):
-        return 30
-    if any(keyword in name for keyword in ["쇼핑", "생활용품"]):
-        return 25
-    if any(keyword in name for keyword in ["식비", "식", "밥"]):
-        return 10
-    return 20
+        ratio = 0.50
+    elif any(keyword in name for keyword in ["모임", "여가", "데이트"]):
+        ratio = 0.60
+    elif any(keyword in name for keyword in ["쇼핑", "생활용품"]):
+        ratio = 0.55
+    elif any(keyword in name for keyword in ["식비", "식", "밥"]):
+        ratio = 0.85
+    else:
+        ratio = 0.70
+    return int(round(amount * ratio / 10_000) * 10_000)
 
 
 def default_priority_for_item(name: str) -> int:
@@ -844,7 +853,7 @@ def default_check_for_item(name: str) -> bool:
 
 def render_reduction_rules(variable_items: list[dict]) -> list[dict]:
     st.markdown("**이번 달 줄일 수 있는 생활비 항목**")
-    st.caption("특별지출이 생겼을 때 먼저 줄여도 되는 항목을 체크하세요. 고정지출은 조정하지 않습니다.")
+    st.caption("특별지출이 생겼을 때 먼저 줄여도 되는 항목을 체크하고, 각 항목의 최소 유지금액을 정하세요. 고정지출은 조정하지 않습니다.")
 
     rules: list[dict] = []
     adjustable_items = [item for item in variable_items if int(item.get("amount", 0)) > 0 and item.get("name")]
@@ -862,13 +871,14 @@ def render_reduction_rules(variable_items: list[dict]) -> list[dict]:
             value=default_check_for_item(name),
             key=f"cut_enable_{item_id}",
         )
-        max_cut_rate = cols[1].slider(
-            "최대 조정률",
+        floor_amount = cols[1].number_input(
+            "최소 유지금액",
             min_value=0,
-            max_value=50,
-            value=default_cut_rate_for_item(name),
-            step=5,
-            key=f"cut_rate_{item_id}",
+            max_value=amount,
+            value=default_floor_amount_for_item(name, amount),
+            step=10_000,
+            format="%d",
+            key=f"floor_amount_{item_id}",
             disabled=not checked,
         )
         priority = cols[2].number_input(
@@ -880,12 +890,12 @@ def render_reduction_rules(variable_items: list[dict]) -> list[dict]:
             key=f"cut_priority_{item_id}",
             disabled=not checked,
         )
-        if checked and max_cut_rate > 0:
+        if checked and floor_amount < amount:
             rules.append({
                 "id": item_id,
                 "name": name,
                 "amount": amount,
-                "max_cut_rate": max_cut_rate / 100,
+                "floor_amount": int(floor_amount),
                 "priority": int(priority),
             })
 
@@ -1148,7 +1158,7 @@ def result_page():
         st.dataframe(reduction_df, hide_index=True, use_container_width=True)
 
     if result.get("uncovered_amount", 0) > 0:
-        st.error(f"아직 조정이 필요한 금액이 {won(result['uncovered_amount'])} 남았습니다. 줄일 수 있는 생활비 항목을 더 체크하거나 조정률을 높여 주세요.")
+        st.error(f"아직 조정이 필요한 금액이 {won(result['uncovered_amount'])} 남았습니다. 줄일 수 있는 생활비 항목을 더 체크하거나 최소 유지금액을 낮춰 주세요.")
 
     st.markdown("### 월급 흐름")
     st.plotly_chart(build_donut_chart(result), use_container_width=True)
