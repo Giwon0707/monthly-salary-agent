@@ -127,10 +127,25 @@ RISK_RATIOS = {
 
 CATEGORY_ORDER = ["고정지출", "생활비", "특별지출", "저축", "투자", "여유자금"]
 CHART_COLORS = ["#4E79A7", "#F28E2B", "#E15759", "#59A14F", "#B07AA1", "#9C755F"]
+MONEY_UNIT = 1_000
+NON_LIVING_ADJUSTMENT_ITEMS = {"여유자금", "투자", "저축"}
+
+
+def round_money(value: float, unit: int = MONEY_UNIT) -> int:
+    return int(round(float(value) / unit) * unit)
+
+
+def floor_money(value: float, unit: int = MONEY_UNIT) -> int:
+    return int(float(value) // unit * unit)
+
+
+def ceil_money(value: float, unit: int = MONEY_UNIT) -> int:
+    value = float(value)
+    return int(-(-value // unit) * unit)
 
 
 def won(value: float) -> str:
-    return f"{int(round(value)):,}원"
+    return f"{round_money(value):,}원"
 
 
 def pct(value: float) -> str:
@@ -220,7 +235,7 @@ def extract_special_expense(text: str) -> tuple[str, int]:
             label = value
             break
 
-    return label, amount
+    return label, round_money(amount)
 
 
 def ask_ai_for_context(form: dict) -> dict | None:
@@ -320,19 +335,29 @@ def build_base_plan(
         investment_ratio *= 0.55
         reasons.append("단기 목표")
 
-    investment = int(round(available * investment_ratio))
+    investment = round_money(available * investment_ratio)
 
     if emergency_ratio < 1:
-        saving = int(round(available * 0.65))
+        saving = round_money(available * 0.65)
     else:
-        saving = int(round(available * 0.50))
+        saving = round_money(available * 0.50)
 
     if saving + investment > available * 0.92:
         scale = available * 0.92 / max(saving + investment, 1)
-        saving = int(round(saving * scale))
-        investment = int(round(investment * scale))
+        saving = floor_money(saving * scale)
+        investment = floor_money(investment * scale)
 
-    buffer_money = income - fixed_total - variable_total - saving - investment
+    # 모든 월별 실행 금액은 1,000원 단위로 맞춘다.
+    available_rounded = floor_money(available)
+    while saving + investment > available_rounded:
+        if investment >= MONEY_UNIT:
+            investment -= MONEY_UNIT
+        elif saving >= MONEY_UNIT:
+            saving -= MONEY_UNIT
+        else:
+            break
+
+    buffer_money = max(available_rounded - saving - investment, 0)
 
     plan = {
         "고정지출": fixed_total,
@@ -357,8 +382,9 @@ def adjust_for_special(
     조정 순서: 여유자금 → 사용자가 체크한 생활비 항목 → 투자 → 저축.
     고정지출은 건드리지 않고, 생활비는 사용자가 허용한 항목과 한도 안에서만 먼저 줄인다.
     """
-    plan = dict(base_plan)
-    plan["특별지출"] = max(special_amount, 0)
+    plan = {key: round_money(value) for key, value in dict(base_plan).items()}
+    special_amount = max(round_money(special_amount), 0)
+    plan["특별지출"] = special_amount
 
     current_variable_items = [dict(item) for item in (variable_items or [])]
     reductions: list[dict] = []
@@ -382,11 +408,12 @@ def adjust_for_special(
         item = item_by_id.get(rule.get("id"))
         if not item:
             continue
-        original_amount = int(item.get("amount", 0))
-        floor_amount = max(int(rule.get("floor_amount", 0)), 0)
+        original_amount = round_money(item.get("amount", 0))
+        floor_amount = max(round_money(rule.get("floor_amount", 0)), 0)
         floor_amount = min(floor_amount, original_amount)
         max_cut = max(original_amount - floor_amount, 0)
         cut = min(max_cut, remaining)
+        cut = floor_money(cut)
         if cut <= 0:
             continue
         item["amount"] = original_amount - cut
@@ -405,7 +432,7 @@ def adjust_for_special(
         reductions.append({
             "항목": "투자",
             "조정액": use_investment,
-            "이유": "이번 달만 일시적으로 축소하고 다음 달 복귀",
+            "이유": "이번 달만 일시적으로 축소하고 다음 달 계획에서 다시 설정",
         })
 
     use_saving = min(plan["저축"], remaining)
@@ -529,7 +556,7 @@ def make_diagnosis(result_seed: dict, income: int) -> tuple[str, str, list[dict]
             summary = "이번 달 계획은 실행 가능하지만 특별지출이 반복되면 평소 계획을 다시 잡아야 합니다."
     else:
         status = "안정"
-        summary = "현재 계획은 안정적으로 실행 가능한 편이며, 다음 달 복귀 기준만 잘 지키면 됩니다."
+        summary = "현재 계획은 안정적으로 실행 가능한 편이며, 다음 달 계획 기준만 잘 지키면 됩니다."
 
     return status, summary, badges
 
@@ -568,14 +595,14 @@ def calculate_plan(form: dict) -> dict:
 
     if ai_context:
         special_label = ai_context.get("special_event") or fallback_label
-        special_amount = int(ai_context.get("special_amount") or fallback_amount or 0)
+        special_amount = round_money(ai_context.get("special_amount") or fallback_amount or 0)
         priority = ai_context.get("priority") or "이번 달의 일시적인 지출만 조정하고 평소 계획은 유지합니다."
     else:
         special_label = fallback_label
         special_amount = fallback_amount
         priority = "여유자금과 조정 가능한 생활비를 먼저 활용하고, 부족한 부분만 투자·저축에서 조정합니다."
 
-    special_amount = min(max(special_amount, 0), max(income - fixed_total, 0))
+    special_amount = min(max(round_money(special_amount), 0), floor_money(max(income - fixed_total, 0)))
     current_plan, current_variable_items, variable_reductions, uncovered_amount = adjust_for_special(
         base_plan=base_plan,
         special_amount=special_amount,
@@ -657,14 +684,14 @@ def calculate_plan(form: dict) -> dict:
         f"월급일에 이번 달 저축 {won(current_plan['저축'])}과 투자 {won(current_plan['투자'])}를 먼저 분리",
         f"{special_label} 비용 {won(special_amount)}은 생활비 계좌와 분리" if special_amount > 0 else "이번 달 특별지출이 없으므로 평소 계획 그대로 실행",
         f"식비는 주당 약 {won(weekly_food)}, 모임·여가비는 주당 약 {won(weekly_social)} 안에서 관리",
-        f"다음 달에는 저축 {won(base_plan['저축'])}, 투자 {won(base_plan['투자'])} 기준으로 복귀",
+        f"다음 달 계획은 저축 {won(base_plan['저축'])}, 투자 {won(base_plan['투자'])} 기준으로 설정",
         f"월말에 비상금이 권장치 {won(emergency_target)} 대비 {emergency_ratio * 100:.0f}% 이상인지 확인",
     ]
 
     explanation = (
         f"평소에는 매월 저축 {won(base_plan['저축'])}, 투자 {won(base_plan['투자'])}를 유지하는 계획입니다. "
         f"이번 달에는 {special_label} {won(special_amount)}이 발생해 여유자금·체크한 생활비·투자·저축 순으로 조정했습니다. "
-        f"다음 달부터는 다시 평소 계획으로 복귀한다고 가정했습니다."
+        f"다음 달부터는 다시 평소 계획을 적용한다고 가정했습니다."
     )
 
     return {
@@ -760,7 +787,7 @@ def render_item_editor(state_key: str, title: str, add_label: str):
             "금액",
             min_value=0,
             value=int(item.get("amount", 0)),
-            step=10_000,
+            step=MONEY_UNIT,
             format="%d",
             key=amount_key,
             label_visibility="collapsed",
@@ -798,12 +825,12 @@ def home():
         )
     with c2:
         st.markdown(
-            '<div class="info-card"><h4>📊 한눈에 보는 결과</h4><div class="muted">이번 달 쓸 돈, 모을 돈, 목표 달성률을 카드형으로 보여줍니다.</div></div>',
+            '<div class="info-card"><h4>🎯 개인 맞춤형 조정</h4><div class="muted">이번 달 특이사항과 줄일 수 있는 생활비 항목을 반영해 계획을 조정합니다.</div></div>',
             unsafe_allow_html=True,
         )
     with c3:
         st.markdown(
-            '<div class="info-card"><h4>↩️ 다음 달 복귀</h4><div class="muted">이번 달 조정안과 다음 달 복귀 기준을 분리해서 계산합니다.</div></div>',
+            '<div class="info-card"><h4>📊 한눈에 보는 결과</h4><div class="muted">이번 달 쓸 돈, 모을 돈, 목표 달성률을 카드형으로 보여줍니다.</div></div>',
             unsafe_allow_html=True,
         )
 
@@ -832,7 +859,7 @@ def default_floor_amount_for_item(name: str, amount: int) -> int:
         ratio = 0.85
     else:
         ratio = 0.70
-    return int(round(amount * ratio / 10_000) * 10_000)
+    return round_money(amount * ratio)
 
 
 def default_priority_for_item(name: str) -> int:
@@ -876,7 +903,7 @@ def render_reduction_rules(variable_items: list[dict]) -> list[dict]:
             min_value=0,
             max_value=amount,
             value=default_floor_amount_for_item(name, amount),
-            step=10_000,
+            step=MONEY_UNIT,
             format="%d",
             key=f"floor_amount_{item_id}",
             disabled=not checked,
@@ -899,13 +926,6 @@ def render_reduction_rules(variable_items: list[dict]) -> list[dict]:
                 "priority": int(priority),
             })
 
-    if rules:
-        ordered = sorted(rules, key=lambda x: x["priority"])
-        order_text = " → ".join([rule["name"] for rule in ordered])
-        st.caption(f"조정 순서: 여유자금 → {order_text} → 투자 → 저축")
-    else:
-        st.caption("조정 순서: 여유자금 → 투자 → 저축")
-
     return rules
 
 
@@ -915,9 +935,9 @@ def input_form():
 
     with st.expander("1. 월급과 목표", expanded=True):
         c1, c2 = st.columns(2)
-        income = c1.number_input("월 실수령액", min_value=0, value=3_500_000, step=100_000, format="%d")
+        income = c1.number_input("월 실수령액", min_value=0, value=3_500_000, step=MONEY_UNIT, format="%d")
         goal_name = c2.text_input("재무 목표", value="목돈 마련")
-        target_amount = c1.number_input("목표 금액", min_value=0, value=100_000_000, step=1_000_000, format="%d")
+        target_amount = c1.number_input("목표 금액", min_value=0, value=100_000_000, step=MONEY_UNIT, format="%d")
         target_months = c2.number_input("목표 기간(개월)", min_value=1, value=36, step=1)
 
     with st.expander("2. 평소 지출 항목", expanded=True):
@@ -930,10 +950,10 @@ def input_form():
 
     with st.expander("3. 현재 자산과 수익률 가정", expanded=False):
         c1, c2 = st.columns(2)
-        cash = c1.number_input("현금·입출금 통장", min_value=0, value=3_000_000, step=100_000, format="%d")
-        savings_assets = c2.number_input("예금·적금", min_value=0, value=5_000_000, step=100_000, format="%d")
-        investment_assets = c1.number_input("주식·ETF", min_value=0, value=2_000_000, step=100_000, format="%d")
-        debt = c2.number_input("대출 잔액", min_value=0, value=0, step=100_000, format="%d")
+        cash = c1.number_input("현금·입출금 통장", min_value=0, value=3_000_000, step=MONEY_UNIT, format="%d")
+        savings_assets = c2.number_input("예금·적금", min_value=0, value=5_000_000, step=MONEY_UNIT, format="%d")
+        investment_assets = c1.number_input("주식·ETF", min_value=0, value=2_000_000, step=MONEY_UNIT, format="%d")
+        debt = c2.number_input("대출 잔액", min_value=0, value=0, step=MONEY_UNIT, format="%d")
         savings_rate = c1.number_input("예금·적금 연 이율(%)", min_value=0.0, max_value=20.0, value=4.0, step=0.1)
         investment_return = c2.number_input("투자 연평균 기대수익률(%)", min_value=-20.0, max_value=30.0, value=6.0, step=0.5)
         risk = c2.selectbox("투자 성향", list(RISK_RATIOS.keys()), index=4)
@@ -1103,8 +1123,15 @@ def build_delta_chart(result: dict):
     return fig
 
 
+def get_living_expense_reductions(result: dict) -> list[dict]:
+    return [
+        row for row in result.get("variable_reductions", [])
+        if row.get("항목") not in NON_LIVING_ADJUSTMENT_ITEMS
+    ]
+
+
 def build_variable_reduction_chart(result: dict):
-    reductions = result.get("variable_reductions", [])
+    reductions = get_living_expense_reductions(result)
     if not reductions:
         return None
 
@@ -1168,7 +1195,7 @@ def result_page():
         st.rerun()
 
     st.title("이번 달 월급 계획 결과 🔎")
-    st.caption("이번 달은 조정하고, 다음 달부터 평소 계획으로 복귀하는 기준입니다.")
+    st.caption("이번 달은 조정하고, 다음 달은 평소 기준으로 계획합니다.")
 
     expected = f"약 {result['expected_months']}개월" if result["expected_months"] >= 0 else "50년 내 달성 어려움"
     target_progress = 1 if form["target_amount"] <= 0 else min(result["total_assets"] / form["target_amount"], 1)
@@ -1201,12 +1228,12 @@ def result_page():
     c2.metric("목표 금액", won(form["target_amount"]))
     c3.metric("달성률", pct(target_progress * 100))
 
-    st.markdown("### 이번 달 계획 vs 다음 달 복귀 계획")
+    st.markdown("### 이번 달 계획 vs 다음 달 계획")
     c1, c2 = st.columns(2)
     with c1:
         render_plan_card("이번 달 조정 계획", result["current_plan"])
     with c2:
-        render_plan_card("다음 달 복귀 계획", result["base_plan"])
+        render_plan_card("다음 달 계획", result["base_plan"])
 
     st.markdown("### 평소 대비 변화")
     st.caption("0원을 기준으로 왼쪽은 줄어든 항목, 오른쪽은 늘어난 항목입니다.")
@@ -1235,14 +1262,15 @@ def result_page():
                 unsafe_allow_html=True,
             )
 
-    if result.get("variable_reductions"):
+    living_reductions = get_living_expense_reductions(result)
+    if living_reductions:
         st.markdown("### 생활비 조정 내역")
         reduction_chart = build_variable_reduction_chart(result)
         if reduction_chart is not None:
             st.plotly_chart(reduction_chart, use_container_width=True)
         reduction_df = pd.DataFrame([
             {"항목": row["항목"], "줄인 금액": won(row["조정액"]), "기준": row["이유"]}
-            for row in result["variable_reductions"]
+            for row in living_reductions
         ])
         with st.expander("생활비 조정 표로 보기", expanded=False):
             st.dataframe(reduction_df, hide_index=True, use_container_width=True)
