@@ -856,7 +856,7 @@ def default_floor_amount_for_item(name: str, amount: int) -> int:
     elif any(keyword in name for keyword in ["쇼핑", "생활용품"]):
         ratio = 0.55
     elif any(keyword in name for keyword in ["식비", "식", "밥"]):
-        ratio = 0.85
+        return min(amount, 250_000)
     else:
         ratio = 0.70
     return round_money(amount * ratio)
@@ -961,7 +961,7 @@ def input_form():
     with st.expander("4. 이번 달 특이사항", expanded=True):
         request = st.text_area(
             "이번 달 상황이나 원하는 조정 내용을 적어주세요.",
-            value="이번 달은 해외여행으로 100만 원 정도 추가 지출이 있을 것 같아. 평소 목표는 유지하면서 이번 달만 조정해줘.",
+            value="이번 달은 해외여행으로 100만 원 정도 추가 지출이 있을 것 같아.",
             height=120,
             help="예: 다음 달 여행 예약금으로 이번 달 30만 원이 더 필요해.",
         )
