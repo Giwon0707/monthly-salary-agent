@@ -1201,9 +1201,14 @@ def result_page():
     target_progress = 1 if form["target_amount"] <= 0 else min(result["total_assets"] / form["target_amount"], 1)
 
     st.markdown("### 3초 요약")
+    current_spending = (
+        result["current_plan"].get("고정지출", 0)
+        + result["current_plan"].get("생활비", 0)
+        + result["current_plan"].get("특별지출", 0)
+    )
     c1, c2, c3 = st.columns(3)
     with c1:
-        render_money_card("이번 달 쓸 돈", won(result["fixed_total"] + result["variable_total"] + result["special_amount"]), "고정지출·생활비·특별지출 합계")
+        render_money_card("이번 달 쓸 돈", won(current_spending), "조정 반영 후 고정지출·생활비·특별지출 합계")
     with c2:
         render_money_card("이번 달 모을 돈", won(result["current_monthly_contribution"]), "이번 달 저축과 투자 합계")
     with c3:
