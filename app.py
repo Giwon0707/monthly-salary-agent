@@ -551,7 +551,7 @@ def make_diagnosis(result_seed: dict, income: int) -> tuple[str, str, list[dict]
     elif any(badge["type"] == "watch" for badge in badges):
         status = "조정 필요"
         if current_plan["투자"] < base_plan["투자"]:
-            summary = "이번 달은 투자금을 줄이고 저축과 필수 지출을 우선하는 방식이 적절합니다."
+            summary = "이번 달은 특별지출을 고려해 일시적으로 계획을 조정했습니다."
         else:
             summary = "이번 달 계획은 실행 가능하지만 특별지출이 반복되면 평소 계획을 다시 잡아야 합니다."
     else:
@@ -1194,7 +1194,7 @@ def result_page():
         st.session_state.page = "form"
         st.rerun()
 
-    st.title("이번 달 월급 계획 결과 🔎")
+    st.title("이번 달 월급 계획 🔎")
     st.caption("이번 달은 조정하고, 다음 달은 평소 기준으로 계획합니다.")
 
     expected = f"약 {result['expected_months']}개월" if result["expected_months"] >= 0 else "50년 내 달성 어려움"
