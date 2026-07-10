@@ -1061,7 +1061,7 @@ def input_form():
             for i, step in enumerate(steps, 1):
                 status_text.caption(step)
                 progress_bar.progress(i / len(steps))
-                time.sleep(1)
+                time.sleep(2)
 
         st.session_state.result = calculate_plan(form_data)
         st.session_state.page = "result"
